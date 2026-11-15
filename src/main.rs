@@ -53,6 +53,7 @@ const BASE_H: f32 = 40.0;
 const CALENDAR_URL: &str = "https://calendar.google.com/calendar/r/day";
 
 struct Theme {
+    light: bool, // Windows taskbar/system theme is light
     fg: u32,
     dim: u32,
     grid: u32,
@@ -119,9 +120,18 @@ fn load_theme() -> Theme {
         );
     }
     if light == 1 {
-        Theme { fg: argb(255, (25, 25, 25)), dim: argb(255, (95, 95, 95)), grid: argb(255, (200, 200, 205)) }
+        Theme { light: true, fg: argb(255, (25, 25, 25)), dim: argb(255, (95, 95, 95)), grid: argb(255, (200, 200, 205)) }
     } else {
-        Theme { fg: argb(255, (235, 235, 235)), dim: argb(255, (160, 160, 160)), grid: argb(255, (70, 72, 80)) }
+        Theme { light: false, fg: argb(255, (235, 235, 235)), dim: argb(255, (160, 160, 160)), grid: argb(255, (70, 72, 80)) }
+    }
+}
+
+/// Matches the hover tooltip to the system theme: Windows' built-in dark tooltip style in dark
+/// mode, the normal one in light mode.
+unsafe fn style_tooltip(tooltip: HWND, light: bool) {
+    if !tooltip.is_null() {
+        let style = wide(if light { "Explorer" } else { "DarkMode_Explorer" });
+        SetWindowTheme(tooltip, style.as_ptr(), null());
     }
 }
 
@@ -399,6 +409,7 @@ unsafe fn create_widget() -> bool {
     let ti = tool_info(&mut text);
     SendMessageW(a.tooltip, TTM_ADDTOOLW, 0, &ti as *const _ as LPARAM);
     SendMessageW(a.tooltip, TTM_SETMAXTIPWIDTH, 0, 800);
+    style_tooltip(a.tooltip, a.theme.light);
     SendMessageW(a.tooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP as usize, 30_000);
     a.tip.clear();
 
@@ -937,6 +948,7 @@ extern "system" fn owner_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
             WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
                 let a = app();
                 a.theme = load_theme();
+                style_tooltip(a.tooltip, a.theme.light);
                 place(true);
                 0
             }
