@@ -1,9 +1,9 @@
 # Calendar widget
 
-The next hour of your Google Calendar, drawn inside the Windows taskbar:
+The next hour (or up to 4 hours) of your Google Calendar, drawn inside the Windows taskbar:
 
-- A red dot marks **now**, and a red line runs one hour to the right.
-- The meetings in that hour sit above the line as colored blocks, in their Google Calendar colors.
+- A red dot marks **now**, and a red line runs one hour (or more, see below) to the right.
+- The meetings in that time sit above the line as colored blocks, in their Google Calendar colors.
 - Invitations you haven't answered yet show as outlined blocks.
 
 Using it:
@@ -11,7 +11,15 @@ Using it:
 - **Hover** to see the rest of today's events with their times.
 - **Click** an event to join its Google Meet call, or to open it if it has no Meet link.
 - **Drag** the widget left or right to move it. It remembers where you put it.
-- **Right-click** it for *Refresh*, *Open Google Calendar*, *Sign in / Sign out*, *Reset position* and *Exit*.
+- **Right-click** it for *Refresh*, *Open Google Calendar*, *Sign in / Sign out*, *Hours shown*,
+  *Reset position* and *Exit*.
+
+### Showing more than one hour
+
+Right-click the widget, point to **Hours shown** and pick 1, 2, 3 or 4 hours. The widget gets
+wider for each extra hour so events stay readable. If you have moved it, its left edge stays put
+and it grows to the right; drag it somewhere else if it now covers other taskbar icons. The choice
+is saved in `settings.json` and kept after a restart.
 
 Events refresh every 2 minutes, and right after the PC wakes from sleep. All-day events,
 working-location entries and declined invitations are hidden.
@@ -133,3 +141,4 @@ Files the widget uses, all in `%USERPROFILE%\.claude\calendar-widget\`:
 - `client_secret_….json`: your Google client ID (from step 2)
 - `token.bin`: your sign-in, encrypted with Windows DPAPI
 - `position.json`: the widget's saved position
+- `settings.json`: how many hours it shows

@@ -1,6 +1,6 @@
-//! Calendar widget: the next hour of your Google Calendar, drawn inside the Windows taskbar.
-//! A red dot marks "now" at the left edge, a red line runs one hour to the right, and the
-//! events in that hour sit above it as colored blocks (Google Calendar's colors).
+//! Calendar widget: the next hours of your Google Calendar (1 by default, up to 4), drawn inside
+//! the Windows taskbar. A red dot marks "now" at the left edge, a red line runs to the right,
+//! and the events in that time sit above it as colored blocks (Google Calendar's colors).
 //!
 //! Hover: today's upcoming events with times. Click an event: join its Meet call, or open it.
 //! Drag left/right: move (remembered). Right-click: refresh, sign in/out, reset position, exit.
@@ -46,9 +46,9 @@ const CMD_OPEN_FOLDER: i32 = 5;
 const CMD_RESET_POSITION: i32 = 6;
 const CMD_EXIT: i32 = 7;
 
-const WINDOW_SECS: i64 = 3600; // the bar shows one hour ahead...
-const PAST_SECS: i64 = 8 * 60; // ...plus a few faded minutes behind "now"
-const BASE_W: f32 = 132.0; // widget size at 100% scaling
+const CMD_HOURS: i32 = 100; // + number of hours: the "Hours shown" submenu
+const MAX_HOURS: i64 = 4; // the events are fetched 6 hours ahead
+const BASE_W: f32 = 132.0; // widget size at 100% scaling, for one hour
 const BASE_H: f32 = 40.0;
 const CALENDAR_URL: &str = "https://calendar.google.com/calendar/r/day";
 
@@ -77,6 +77,8 @@ struct App {
     taskbar: HWND,
     dir: PathBuf,
     pos_file: PathBuf,
+    settings_file: PathBuf,
+    hours: i64, // how many hours ahead the bar shows (setting)
     events: Vec<Event>,
     status: Status,
     updated: Option<i64>,
@@ -275,7 +277,7 @@ unsafe fn on_signed_in() {
 
 /// Events overlapping the hour shown on the bar.
 fn visible(events: &[Event], t: i64) -> impl Iterator<Item = &Event> {
-    events.iter().filter(move |e| e.end > t - PAST_SECS && e.start < t + WINDOW_SECS)
+    events.iter().filter(move |e| e.end > t - past_secs() && e.start < t + window_secs())
 }
 
 fn tooltip_text() -> String {
@@ -333,6 +335,31 @@ unsafe fn redraw() {
 
 // ---- position -----------------------------------------------------------------------------
 
+/// The bar shows this many seconds ahead of "now"...
+fn window_secs() -> i64 {
+    app().hours * 3600
+}
+
+/// ...plus a few faded minutes behind it (at most 15: that's how far back events are fetched)
+fn past_secs() -> i64 {
+    (app().hours * 8 * 60).min(15 * 60)
+}
+
+/// Widget width at 100% scaling: half as wide again for each extra hour, so events stay readable
+fn base_width(hours: i64) -> f32 {
+    BASE_W * (1.0 + 0.5 * (hours - 1) as f32)
+}
+
+/// settings.json: {"hours": 2}
+fn load_hours(path: &PathBuf) -> i64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())
+        .and_then(|v| v.get("hours")?.as_i64())
+        .unwrap_or(1)
+        .clamp(1, MAX_HOURS)
+}
+
 fn load_offset(path: &PathBuf) -> Option<i32> {
     let s = std::fs::read_to_string(path).ok()?;
     let v: Value = serde_json::from_str(s.trim_start_matches('\u{feff}')).ok()?;
@@ -375,7 +402,7 @@ unsafe fn place(force: bool) {
         return; // vertical or odd taskbar
     }
     a.scale = h as f32 / 48.0; // the Windows 11 taskbar is 48 px tall at 100% scaling
-    let (w, fh) = ((BASE_W * a.scale) as i32, (BASE_H * a.scale) as i32);
+    let (w, fh) = ((base_width(a.hours) * a.scale) as i32, (BASE_H * a.scale) as i32);
     let off = a.offset.unwrap_or_else(|| default_offset(&t, a.scale));
     let b = ((t.right - t.left) - off - w, (h - fh) / 2, w, fh);
     if !force && b == a.bounds {
@@ -581,10 +608,10 @@ unsafe fn paint(hwnd: HWND) {
 
     let t = now();
     let red = argb(255, (234, 67, 53));
-    // Time axis: PAST_SECS of fading past on the left, the red "now" marker, then one hour
+    // Time axis: past_secs() of fading past on the left, the red "now" marker, then the hours
     let x1 = w as f32 - 1.0 * sc; // now + 1 hour
-    let ppm = x1 / ((PAST_SECS + WINDOW_SECS) as f32 / 60.0); // px per minute
-    let x_of = |unix: i64| (unix - (t - PAST_SECS)) as f32 / 60.0 * ppm;
+    let ppm = x1 / ((past_secs() + window_secs()) as f32 / 60.0); // px per minute
+    let x_of = |unix: i64| (unix - (t - past_secs())) as f32 / 60.0 * ppm;
     let x_now = x_of(t);
     let fade_r = 10.0 * sc; // events running past the hour fade out over this width
     let hf = h as f32;
@@ -594,8 +621,8 @@ unsafe fn paint(hwnd: HWND) {
     let f_label = font(8.5);
     let label_b = solid(a.theme.dim);
     let mut labels: Vec<(f32, String)> = Vec::new(); // drawn after the events, where uncovered
-    let mut q = ((t - PAST_SECS) / 900 + 1) * 900;
-    while q < t + WINDOW_SECS {
+    let mut q = ((t - past_secs()) / 900 + 1) * 900;
+    while q < t + window_secs() {
         let x = x_of(q);
         if local_time(q).wMinute == 0 {
             line(a.theme.grid, 1.0 * sc, x, top, x, hf - 1.0 * sc);
@@ -648,8 +675,8 @@ unsafe fn paint(hwnd: HWND) {
         let f = if n > 1.0 { f_small } else { f_main };
         for (e, &lane) in ev.iter().zip(&lanes) {
             // Ends outside the window are pushed off-canvas, so only real ends are rounded
-            let continues = e.end > t + WINDOW_SECS;
-            let bx = if e.start < t - PAST_SECS { -20.0 * sc } else { x_of(e.start) };
+            let continues = e.end > t + window_secs();
+            let bx = if e.start < t - past_secs() { -20.0 * sc } else { x_of(e.start) };
             let bx2 = if continues { x1 + 20.0 * sc } else { x_of(e.end) - 1.0 * sc };
             let by = top + lane as f32 * (lh + gap);
             if bx2 - bx < 2.0 {
@@ -715,7 +742,7 @@ unsafe fn paint(hwnd: HWND) {
             a.hits.push((bx.max(0.0), by, bx2.min(x1), by + lh, link));
         }
         if !ev.iter().any(|e| e.end > t) {
-            let next = a.events.iter().find(|e| e.start >= t + WINDOW_SECS && same_day(e.start, t));
+            let next = a.events.iter().find(|e| e.start >= t + window_secs() && same_day(e.start, t));
             let msg = match next {
                 Some(e) => format!("Free · next {} {}", hm(e.start), e.title),
                 None => "Free".to_string(),
@@ -811,6 +838,13 @@ unsafe fn show_menu() {
     } else {
         item(CMD_SIGN_IN, "Sign in with Google");
     }
+    let hours = CreatePopupMenu();
+    for h in 1..=MAX_HOURS {
+        let check = if h == a.hours { MF_CHECKED } else { MF_UNCHECKED };
+        let label = if h == 1 { "1 hour".to_string() } else { format!("{h} hours") };
+        AppendMenuW(hours, MF_STRING | check, (CMD_HOURS + h as i32) as usize, wide(&label).as_ptr());
+    }
+    AppendMenuW(menu, MF_POPUP, hours as usize, wide("Hours shown").as_ptr());
     item(CMD_RESET_POSITION, "Reset position");
     item(CMD_EXIT, "Exit");
     let mut p: POINT = zeroed();
@@ -832,6 +866,20 @@ unsafe fn show_menu() {
         CMD_OPEN_FOLDER => {
             let _ = std::fs::create_dir_all(&a.dir);
             google::open_url(&a.dir.to_string_lossy());
+        }
+        c if c > CMD_HOURS && c <= CMD_HOURS + MAX_HOURS as i32 => {
+            let old_w = (base_width(a.hours) * a.scale) as i32;
+            a.hours = (c - CMD_HOURS) as i64;
+            let _ = std::fs::write(&a.settings_file, format!("{{\"hours\": {}}}", a.hours));
+            // A widget the user placed keeps its left edge and grows/shrinks on the right
+            // (the default spot stays anchored next to the tray icons instead)
+            if let Some(off) = a.offset {
+                let off = off - ((base_width(a.hours) * a.scale) as i32 - old_w);
+                a.offset = Some(off);
+                let _ = std::fs::write(&a.pos_file, format!("{{\"offset\": {off}}}"));
+            }
+            place(true);
+            redraw();
         }
         CMD_RESET_POSITION => {
             a.offset = None;
@@ -1027,6 +1075,7 @@ fn main() {
             .join("calendar-widget");
         let _ = std::fs::create_dir_all(&dir);
         let pos_file = dir.join("position.json");
+        let settings_file = dir.join("settings.json");
         let status = if !google::has_client(&dir) {
             Status::NoClient
         } else if !google::has_token(&dir) {
@@ -1044,6 +1093,8 @@ fn main() {
             offset: load_offset(&pos_file),
             dir,
             pos_file,
+            hours: load_hours(&settings_file),
+            settings_file,
             events: Vec::new(),
             status,
             updated: None,
