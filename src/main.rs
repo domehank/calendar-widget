@@ -48,6 +48,8 @@ const CMD_EXIT: i32 = 7;
 
 const CMD_HOURS: i32 = 100; // + number of hours: the "Hours shown" submenu
 const MAX_HOURS: i64 = 4; // the events are fetched 6 hours ahead
+const CMD_WIDTH: i32 = 200; // + index into WIDTHS: the "Width" submenu
+const WIDTHS: [(i64, &str); 4] = [(75, "Compact"), (100, "Normal"), (150, "Wide"), (200, "Extra wide")];
 const BASE_W: f32 = 132.0; // widget size at 100% scaling, for one hour
 const BASE_H: f32 = 40.0;
 const CALENDAR_URL: &str = "https://calendar.google.com/calendar/r/day";
@@ -79,6 +81,7 @@ struct App {
     pos_file: PathBuf,
     settings_file: PathBuf,
     hours: i64, // how many hours ahead the bar shows (setting)
+    width: i64, // width in percent of the normal width for those hours (setting)
     events: Vec<Event>,
     status: Status,
     updated: Option<i64>,
@@ -345,19 +348,38 @@ fn past_secs() -> i64 {
     (app().hours * 8 * 60).min(15 * 60)
 }
 
-/// Widget width at 100% scaling: half as wide again for each extra hour, so events stay readable
-fn base_width(hours: i64) -> f32 {
-    BASE_W * (1.0 + 0.5 * (hours - 1) as f32)
+/// Widget width at 100% scaling: half as wide again for each extra hour, so events stay
+/// readable, times the width setting
+fn base_width(hours: i64, width: i64) -> f32 {
+    BASE_W * (1.0 + 0.5 * (hours - 1) as f32) * width as f32 / 100.0
 }
 
-/// settings.json: {"hours": 2}
-fn load_hours(path: &PathBuf) -> i64 {
-    std::fs::read_to_string(path)
+/// settings.json: {"hours": 2, "width": 150}
+fn load_settings(path: &PathBuf) -> (i64, i64) {
+    let v = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())
-        .and_then(|v| v.get("hours")?.as_i64())
-        .unwrap_or(1)
-        .clamp(1, MAX_HOURS)
+        .unwrap_or(Value::Null);
+    let hours = v.get("hours").and_then(Value::as_i64).unwrap_or(1).clamp(1, MAX_HOURS);
+    let width = v.get("width").and_then(Value::as_i64).filter(|w| WIDTHS.iter().any(|x| x.0 == *w)).unwrap_or(100);
+    (hours, width)
+}
+
+/// Applies a new hours/width setting, saves it and resizes the widget. A widget the user placed
+/// keeps its left edge and grows/shrinks on the right (the default spot stays anchored next to
+/// the tray icons instead).
+unsafe fn apply_settings(hours: i64, width: i64) {
+    let a = app();
+    let old_w = (base_width(a.hours, a.width) * a.scale) as i32;
+    (a.hours, a.width) = (hours, width);
+    let _ = std::fs::write(&a.settings_file, format!("{{\"hours\": {hours}, \"width\": {width}}}"));
+    if let Some(off) = a.offset {
+        let off = off - ((base_width(hours, width) * a.scale) as i32 - old_w);
+        a.offset = Some(off);
+        let _ = std::fs::write(&a.pos_file, format!("{{\"offset\": {off}}}"));
+    }
+    place(true);
+    redraw();
 }
 
 fn load_offset(path: &PathBuf) -> Option<i32> {
@@ -402,7 +424,7 @@ unsafe fn place(force: bool) {
         return; // vertical or odd taskbar
     }
     a.scale = h as f32 / 48.0; // the Windows 11 taskbar is 48 px tall at 100% scaling
-    let (w, fh) = ((base_width(a.hours) * a.scale) as i32, (BASE_H * a.scale) as i32);
+    let (w, fh) = ((base_width(a.hours, a.width) * a.scale) as i32, (BASE_H * a.scale) as i32);
     let off = a.offset.unwrap_or_else(|| default_offset(&t, a.scale));
     let b = ((t.right - t.left) - off - w, (h - fh) / 2, w, fh);
     if !force && b == a.bounds {
@@ -845,13 +867,21 @@ unsafe fn show_menu() {
         AppendMenuW(hours, MF_STRING | check, (CMD_HOURS + h as i32) as usize, wide(&label).as_ptr());
     }
     AppendMenuW(menu, MF_POPUP, hours as usize, wide("Hours shown").as_ptr());
+    let widths = CreatePopupMenu();
+    for (i, (pct, name)) in WIDTHS.iter().enumerate() {
+        let check = if *pct == a.width { MF_CHECKED } else { MF_UNCHECKED };
+        AppendMenuW(widths, MF_STRING | check, (CMD_WIDTH + i as i32) as usize, wide(name).as_ptr());
+    }
+    AppendMenuW(menu, MF_POPUP, widths as usize, wide("Width").as_ptr());
     item(CMD_RESET_POSITION, "Reset position");
     item(CMD_EXIT, "Exit");
     let mut p: POINT = zeroed();
     GetCursorPos(&mut p);
     SetForegroundWindow(a.owner); // so the menu closes when clicking elsewhere
+    SendMessageW(a.tooltip, TTM_ACTIVATE, 0, 0); // no tooltip over the open menu
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, p.x, p.y, 0, a.owner, null());
     PostMessageW(a.owner, WM_NULL, 0, 0);
+    SendMessageW(a.tooltip, TTM_ACTIVATE, 1, 0);
     DestroyMenu(menu);
     match cmd {
         CMD_REFRESH => start_fetch(),
@@ -867,19 +897,9 @@ unsafe fn show_menu() {
             let _ = std::fs::create_dir_all(&a.dir);
             google::open_url(&a.dir.to_string_lossy());
         }
-        c if c > CMD_HOURS && c <= CMD_HOURS + MAX_HOURS as i32 => {
-            let old_w = (base_width(a.hours) * a.scale) as i32;
-            a.hours = (c - CMD_HOURS) as i64;
-            let _ = std::fs::write(&a.settings_file, format!("{{\"hours\": {}}}", a.hours));
-            // A widget the user placed keeps its left edge and grows/shrinks on the right
-            // (the default spot stays anchored next to the tray icons instead)
-            if let Some(off) = a.offset {
-                let off = off - ((base_width(a.hours) * a.scale) as i32 - old_w);
-                a.offset = Some(off);
-                let _ = std::fs::write(&a.pos_file, format!("{{\"offset\": {off}}}"));
-            }
-            place(true);
-            redraw();
+        c if c > CMD_HOURS && c <= CMD_HOURS + MAX_HOURS as i32 => apply_settings((c - CMD_HOURS) as i64, a.width),
+        c if c >= CMD_WIDTH && c < CMD_WIDTH + WIDTHS.len() as i32 => {
+            apply_settings(a.hours, WIDTHS[(c - CMD_WIDTH) as usize].0)
         }
         CMD_RESET_POSITION => {
             a.offset = None;
@@ -1093,7 +1113,8 @@ fn main() {
             offset: load_offset(&pos_file),
             dir,
             pos_file,
-            hours: load_hours(&settings_file),
+            hours: load_settings(&settings_file).0,
+            width: load_settings(&settings_file).1,
             settings_file,
             events: Vec::new(),
             status,

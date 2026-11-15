@@ -12,14 +12,21 @@ Using it:
 - **Click** an event to join its Google Meet call, or to open it if it has no Meet link.
 - **Drag** the widget left or right to move it. It remembers where you put it.
 - **Right-click** it for *Refresh*, *Open Google Calendar*, *Sign in / Sign out*, *Hours shown*,
-  *Reset position* and *Exit*.
+  *Width*, *Reset position* and *Exit*.
 
-### Showing more than one hour
+### Changing how much it shows and how wide it is
 
-Right-click the widget, point to **Hours shown** and pick 1, 2, 3 or 4 hours. The widget gets
-wider for each extra hour so events stay readable. If you have moved it, its left edge stays put
-and it grows to the right; drag it somewhere else if it now covers other taskbar icons. The choice
-is saved in `settings.json` and kept after a restart.
+Right-click the widget and use these two menus:
+
+- **Hours shown**: 1, 2, 3 or 4 hours ahead. The widget gets wider for each extra hour so
+  events stay readable.
+- **Width**: *Compact*, *Normal*, *Wide* or *Extra wide* (75%, 100%, 150% or 200% of the
+  normal width for the hours shown). Use it to fit the widget into the space you have, or to make
+  event titles easier to read.
+
+If you have moved the widget, its left edge stays put and it grows or shrinks on the right. Drag
+it somewhere else if it now covers other taskbar icons. Both choices are saved in `settings.json`
+and kept after a restart.
 
 Events refresh every 2 minutes, and right after the PC wakes from sleep. All-day events,
 working-location entries and declined invitations are hidden.
@@ -141,4 +148,4 @@ Files the widget uses, all in `%USERPROFILE%\.claude\calendar-widget\`:
 - `client_secret_….json`: your Google client ID (from step 2)
 - `token.bin`: your sign-in, encrypted with Windows DPAPI
 - `position.json`: the widget's saved position
-- `settings.json`: how many hours it shows
+- `settings.json`: how many hours it shows and its width
