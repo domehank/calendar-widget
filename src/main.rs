@@ -5,7 +5,7 @@
 //! Hover: today's upcoming events with times. Click an event: join its Meet call, or open it.
 //! Drag left/right: move (remembered). Right-click: refresh, sign in/out, reset position, exit.
 //!
-//! Same structure as the Claude usage widget: a layered child window of the taskbar
+//! The widget is a layered child window of the taskbar
 //! (Shell_TrayWnd), recreated after Explorer restarts. Network calls run on worker threads
 //! that hand results back through a mutex and a posted message.
 
@@ -53,7 +53,6 @@ const BASE_H: f32 = 40.0;
 const CALENDAR_URL: &str = "https://calendar.google.com/calendar/r/day";
 
 struct Theme {
-    key: (u8, u8, u8), // transparent background color (layered window color key)
     fg: u32,
     dim: u32,
     grid: u32,
@@ -120,14 +119,10 @@ fn load_theme() -> Theme {
         );
     }
     if light == 1 {
-        Theme { key: (238, 238, 238), fg: argb(255, (25, 25, 25)), dim: argb(255, (95, 95, 95)), grid: argb(255, (200, 200, 205)) }
+        Theme { fg: argb(255, (25, 25, 25)), dim: argb(255, (95, 95, 95)), grid: argb(255, (200, 200, 205)) }
     } else {
-        Theme { key: (28, 28, 28), fg: argb(255, (235, 235, 235)), dim: argb(255, (160, 160, 160)), grid: argb(255, (70, 72, 80)) }
+        Theme { fg: argb(255, (235, 235, 235)), dim: argb(255, (160, 160, 160)), grid: argb(255, (70, 72, 80)) }
     }
-}
-
-fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
-    r as u32 | (g as u32) << 8 | (b as u32) << 16
 }
 
 // ---- time formatting ----------------------------------------------------------------------
@@ -304,7 +299,7 @@ unsafe fn redraw() {
     update_tooltip();
     let a = app();
     if !a.widget.is_null() {
-        InvalidateRect(a.widget, null(), 0);
+        paint(a.widget);
     }
 }
 
@@ -360,7 +355,7 @@ unsafe fn place(force: bool) {
     }
     a.bounds = b;
     SetWindowPos(a.widget, HWND_TOP, b.0, b.1, b.2, b.3, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(a.widget, null(), 0);
+    paint(a.widget);
 }
 
 // ---- widget lifetime ----------------------------------------------------------------------
@@ -386,7 +381,6 @@ unsafe fn create_widget() -> bool {
     if hwnd.is_null() {
         return false;
     }
-    SetLayeredWindowAttributes(hwnd, colorref(a.theme.key), 0, LWA_COLORKEY);
     a.widget = hwnd;
     a.bounds = (0, 0, 0, 0);
 
@@ -486,24 +480,36 @@ unsafe fn round_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> *mut gp::GpPath 
     path
 }
 
+const PIXEL_FORMAT_32BPP_PARGB: i32 = 0x000E_200B; // GDI+ PixelFormat32bppPARGB
+
+/// Draws the widget into a 32-bit ARGB bitmap and hands it to the layered window.
+/// The background is alpha 1: invisible, but it still catches the mouse over the whole widget
+/// (fully transparent pixels would let clicks fall through to the taskbar).
 unsafe fn paint(hwnd: HWND) {
     let a = app();
-    let mut ps: PAINTSTRUCT = zeroed();
-    let hdc = BeginPaint(hwnd, &mut ps);
     let mut rc: RECT = zeroed();
     GetClientRect(hwnd, &mut rc);
     let (w, h) = (rc.right, rc.bottom);
-
-    // Double-buffered: draw into a memory bitmap filled with the transparent key color
-    let mem = CreateCompatibleDC(hdc);
-    let bmp = CreateCompatibleBitmap(hdc, w, h);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let screen = GetDC(null_mut());
+    let mem = CreateCompatibleDC(screen);
+    let mut bmi: BITMAPINFO = zeroed();
+    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    let mut bits = null_mut();
+    let bmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
     let old = SelectObject(mem, bmp as HGDIOBJ);
-    let bg = CreateSolidBrush(colorref(a.theme.key));
-    FillRect(mem, &rc, bg);
-    DeleteObject(bg as HGDIOBJ);
-
+    let mut canvas = null_mut();
+    gp::GdipCreateBitmapFromScan0(w, h, w * 4, PIXEL_FORMAT_32BPP_PARGB, bits as *const u8, &mut canvas);
     let mut g = null_mut();
-    gp::GdipCreateFromHDC(mem, &mut g);
+    gp::GdipGetImageGraphicsContext(canvas as *mut gp::GpImage, &mut g);
+    gp::GdipGraphicsClear(g, 0x0100_0000);
     gp::GdipSetSmoothingMode(g, gp::SmoothingModeAntiAlias);
     gp::GdipSetTextRenderingHint(g, gp::TextRenderingHintAntiAliasGridFit);
     let sc = a.scale;
@@ -722,12 +728,16 @@ unsafe fn paint(hwnd: HWND) {
     gp::GdipDeleteStringFormat(fmt_wrap);
     gp::GdipDeleteFontFamily(family);
     gp::GdipDeleteGraphics(g);
+    gp::GdipDisposeImage(canvas as *mut gp::GpImage);
 
-    BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
+    let size = SIZE { cx: w, cy: h };
+    let src = POINT { x: 0, y: 0 };
+    let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+    UpdateLayeredWindow(hwnd, screen, null(), &size, mem, &src, 0, &blend, ULW_ALPHA);
     SelectObject(mem, old);
     DeleteObject(bmp as HGDIOBJ);
     DeleteDC(mem);
-    EndPaint(hwnd, &ps);
+    ReleaseDC(null_mut(), screen);
 }
 
 // ---- input --------------------------------------------------------------------------------
@@ -817,7 +827,8 @@ extern "system" fn widget_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     unsafe {
         match msg {
             WM_PAINT => {
-                paint(hwnd);
+                // Layered windows are redrawn with paint() directly; just validate here
+                ValidateRect(hwnd, null());
                 0
             }
             WM_ERASEBKGND => 1,
@@ -926,9 +937,6 @@ extern "system" fn owner_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
             WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
                 let a = app();
                 a.theme = load_theme();
-                if !a.widget.is_null() {
-                    SetLayeredWindowAttributes(a.widget, colorref(a.theme.key), 0, LWA_COLORKEY);
-                }
                 place(true);
                 0
             }
